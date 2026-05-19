@@ -32,6 +32,7 @@ struct CompassData {
   float minX, minY, minZ;
   float maxX, maxY, maxZ;
   float heading;
+  float pitch, roll;
   bool sensor_ok;
   
   bool is_calibrating;
@@ -44,6 +45,7 @@ CompassData g_data = {
   10000.0f, 10000.0f, 10000.0f,       // minX, minY, minZ
   -10000.0f, -10000.0f, -10000.0f,    // maxX, maxY, maxZ
   0.0f,                               // heading
+  0.0f, 0.0f,                         // pitch, roll
   false,                              // sensor_ok
   false,                              // is_calibrating
   {0, 0, 0},                          // cal_offset
@@ -131,13 +133,16 @@ void handleRoot() {
 void handleData() {
   char json[1024];
   snprintf(json, sizeof(json), 
-      "{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,\"minX\":%.2f,\"minY\":%.2f,\"minZ\":%.2f,\"maxX\":%.2f,\"maxY\":%.2f,\"maxZ\":%.2f,\"heading\":%.2f,\"ok\":%s,\"is_calibrating\":%s,"
+      "{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,\"minX\":%.2f,\"minY\":%.2f,\"minZ\":%.2f,\"maxX\":%.2f,\"maxY\":%.2f,\"maxZ\":%.2f,\"heading\":%.2f,\"pitch\":%.2f,\"roll\":%.2f,\"ok\":%s,\"is_calibrating\":%s,"
       "\"cal_offset\":[%.2f,%.2f,%.2f],"
       "\"cal_matrix\":[[%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f]]}",
       g_data.magX, g_data.magY, g_data.magZ, 
       g_data.minX, g_data.minY, g_data.minZ,
       g_data.maxX, g_data.maxY, g_data.maxZ,
-      g_data.heading, g_data.sensor_ok ? "true" : "false",
+      g_data.heading, 
+      g_data.pitch * 180.0f / PI, 
+      g_data.roll * 180.0f / PI,
+      g_data.sensor_ok ? "true" : "false",
       g_data.is_calibrating ? "true" : "false",
       g_data.cal_offset[0], g_data.cal_offset[1], g_data.cal_offset[2],
       g_data.cal_matrix[0][0], g_data.cal_matrix[0][1], g_data.cal_matrix[0][2],
@@ -286,65 +291,50 @@ void loop() {
         Wire.beginTransmission(icm_addr);
         Wire.write(0x2D);
         Wire.endTransmission(false);
-        Wire.requestFrom((uint16_t)icm_addr, (uint8_t)6);
-        if (Wire.available() >= 6) {
+        uint8_t bytesRead = Wire.requestFrom((uint16_t)icm_addr, (uint8_t)6);
+        if (bytesRead >= 6) {
           int16_t ax_raw = (Wire.read() << 8) | Wire.read();
           int16_t ay_raw = (Wire.read() << 8) | Wire.read();
           int16_t az_raw = (Wire.read() << 8) | Wire.read();
           
           static float ax_avg = 0, ay_avg = 0, az_avg = 0;
-          ax_avg = ax_avg * 0.9f + ax_raw * 0.1f;
-          ay_avg = ay_avg * 0.9f + ay_raw * 0.1f;
-          az_avg = az_avg * 0.9f + az_raw * 0.1f;
+          ax_avg = ax_avg * 0.8f + ax_raw * 0.2f;
+          ay_avg = ay_avg * 0.8f + ay_raw * 0.2f;
+          az_avg = az_avg * 0.8f + az_raw * 0.2f;
 
-          // Map Accel to Mag frame (ICM20948 datasheet: Accel_X=Mag_Y, Accel_Y=Mag_X, Accel_Z=-Mag_Z)
-          float gx = ay_avg;
-          float gy = ax_avg;
-          float gz = -az_avg;
+          // Map Accel to Mag frame (AK09916 inside ICM20948)
+          // Mag X = Accel Y, Mag Y = Accel X, Mag Z = -Accel Z
+          float Ax = ay_avg;
+          float Ay = ax_avg;
+          float Az = -az_avg;
 
-          float g_norm = sqrt(gx*gx + gy*gy + gz*gz);
-          if (g_norm > 0) { gx /= g_norm; gy /= g_norm; gz /= g_norm; }
-          else { gx = 1; gy = 0; gz = 0; }
+          // Normalize Accelerometer (Gravity) Vector
+          float normA = sqrt(Ax*Ax + Ay*Ay + Az*Az);
+          if (normA == 0) normA = 1;
+          Ax /= normA;
+          Ay /= normA;
+          Az /= normA;
 
-          float mx = g_data.magX;
-          float my = g_data.magY;
-          float mz = g_data.magZ;
+          // Calculate Pitch (theta) and Roll (phi)
+          g_data.pitch = atan2f(-Ax, sqrt(Ay*Ay + Az*Az));
+          g_data.roll = atan2f(Ay, Az);
 
-          // 1. Horizontal Mag vector (m - (m dot g)*g)
-          float m_dot_g = mx*gx + my*gy + mz*gz;
-          float m_hx = mx - m_dot_g * gx;
-          float m_hy = my - m_dot_g * gy;
-          float m_hz = mz - m_dot_g * gz;
+          // Apply Tilt Compensation
+          float Mx = g_data.magX;
+          float My = g_data.magY;
+          float Mz = g_data.magZ;
 
-          // 2. Device Forward vector (0, 0, 1) projected to horizontal
-          float f_dot_g = gz;
-          float f_hx = 0 - f_dot_g * gx;
-          float f_hy = 0 - f_dot_g * gy;
-          float f_hz = 1 - f_dot_g * gz;
-          float f_norm = sqrt(f_hx*f_hx + f_hy*f_hy + f_hz*f_hz);
-          if (f_norm > 0) { f_hx /= f_norm; f_hy /= f_norm; f_hz /= f_norm; }
-          else { f_hx = 0; f_hy = 0; f_hz = 1; }
+          float Xh = Mx * cos(g_data.pitch) + My * sin(g_data.roll)*sin(g_data.pitch) + Mz * cos(g_data.roll)*sin(g_data.pitch);
+          float Yh = My * cos(g_data.roll) - Mz * sin(g_data.roll);
 
-          // 3. Device Right vector (0, -1, 0) projected to horizontal
-          float r_dot_g = -gy;
-          float r_hx = 0 - r_dot_g * gx;
-          float r_hy = -1 - r_dot_g * gy;
-          float r_hz = 0 - r_dot_g * gz;
-          float r_norm = sqrt(r_hx*r_hx + r_hy*r_hy + r_hz*r_hz);
-          if (r_norm > 0) { r_hx /= r_norm; r_hy /= r_norm; r_hz /= r_norm; }
-          else { r_hx = 0; r_hy = -1; r_hz = 0; }
-
-          // Calculate North and East components
-          float mag_north = m_hx * f_hx + m_hy * f_hy + m_hz * f_hz;
-          float mag_east  = m_hx * r_hx + m_hy * r_hy + m_hz * r_hz;
-
-          // Calculate heading with circular averaging
+          // Calculate heading
+          float current_h_rad = atan2f(-Yh, Xh);
+          
           static float sin_samples[5] = {0};
           static float cos_samples[5] = {0};
           static int sample_idx = 0;
           static int sample_count = 0;
-
-          float current_h_rad = atan2f(mag_east, mag_north);
+          
           sin_samples[sample_idx] = sinf(current_h_rad);
           cos_samples[sample_idx] = cosf(current_h_rad);
           
@@ -358,6 +348,8 @@ void loop() {
           }
 
           g_data.heading = atan2f(sum_sin, sum_cos) * 180.0f / PI;
+          // Apply hardware orientation offset if needed
+          g_data.heading -= 90.0f;
           if (g_data.heading < 0) g_data.heading += 360.0f;
           if (g_data.heading >= 360.0f) g_data.heading -= 360.0f;
         }
