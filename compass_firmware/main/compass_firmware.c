@@ -9,6 +9,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "driver/i2c_master.h"
 #include "led_strip.h"
 #include "esp_http_server.h"
@@ -38,17 +39,29 @@ static const char *TAG = "CompassTest";
 
 // Data Structure
 typedef struct {
-    float magX, magY, magZ;
-    float minX, minY, minZ;
-    float maxX, maxY, maxZ;
+    float magX, magY, magZ; // Compensated values
+    float minX, minY, minZ; // Raw mins for calibration
+    float maxX, maxY, maxZ; // Raw maxes for calibration
     float heading;
     bool sensor_ok;
+    
+    // Calibration State
+    bool is_calibrating;
+    float cal_offset[3];
+    float cal_matrix[3][3];
 } compass_data_t;
 
 static compass_data_t g_data = {
     .minX = 10000, .minY = 10000, .minZ = 10000,
     .maxX = -10000, .maxY = -10000, .maxZ = -10000,
-    .sensor_ok = false
+    .sensor_ok = false,
+    .is_calibrating = false,
+    .cal_offset = {0, 0, 0},
+    .cal_matrix = {
+        {1.0f, 0.0f, 0.0f},
+        {0.0f, 1.0f, 0.0f},
+        {0.0f, 0.0f, 1.0f}
+    }
 };
 static SemaphoreHandle_t g_data_mux;
 
@@ -59,11 +72,47 @@ i2c_master_dev_handle_t mag_handle;
 led_strip_handle_t led_strip;
 
 // Function Prototypes
-void wifi_init_softap(void);
+void wifi_init_sta(void);
 void i2c_master_init(void);
 void icm20948_init(void);
 void led_strip_init(void);
 esp_err_t start_rest_server(void);
+void load_calibration(void);
+void save_calibration(void);
+
+// NVS Calibration Functions
+void load_calibration(void) {
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("storage", NVS_READONLY, &my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "No NVS storage found, using default identity calibration");
+        return;
+    }
+    
+    size_t len = sizeof(g_data.cal_offset);
+    if (nvs_get_blob(my_handle, "cal_offset", g_data.cal_offset, &len) == ESP_OK) {
+        ESP_LOGI(TAG, "Loaded calibration offset");
+    }
+    
+    len = sizeof(g_data.cal_matrix);
+    if (nvs_get_blob(my_handle, "cal_matrix", g_data.cal_matrix, &len) == ESP_OK) {
+        ESP_LOGI(TAG, "Loaded calibration matrix");
+    }
+    
+    nvs_close(my_handle);
+}
+
+void save_calibration(void) {
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) return;
+    
+    nvs_set_blob(my_handle, "cal_offset", g_data.cal_offset, sizeof(g_data.cal_offset));
+    nvs_set_blob(my_handle, "cal_matrix", g_data.cal_matrix, sizeof(g_data.cal_matrix));
+    nvs_commit(my_handle);
+    nvs_close(my_handle);
+    ESP_LOGI(TAG, "Calibration saved to NVS");
+}
 
 // WiFi Event Handler
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
@@ -144,7 +193,7 @@ void icm20948_init(void) {
     }
     
     // Reset
-    data[0] = 0x06; data[1] = 0x81; // DEVICE_RESET + Wake up (bit 0 is not used for wake up in PWR_MGMT_1 but let's see)
+    data[0] = 0x06; data[1] = 0x81;
     i2c_master_transmit(icm_handle, data, 2, -1);
     vTaskDelay(pdMS_TO_TICKS(100));
     
@@ -190,36 +239,52 @@ void sensor_task(void *pvParameters) {
     
     while (1) {
         if (i2c_master_transmit_receive(mag_handle, &mag_reg, 1, mag_data, 8, -1) == ESP_OK) {
-            int16_t x = (int16_t)((mag_data[1] << 8) | mag_data[0]);
-            int16_t y = (int16_t)((mag_data[3] << 8) | mag_data[2]);
-            int16_t z = (int16_t)((mag_data[5] << 8) | mag_data[4]);
+            int16_t x_raw = (int16_t)((mag_data[1] << 8) | mag_data[0]);
+            int16_t y_raw = (int16_t)((mag_data[3] << 8) | mag_data[2]);
+            int16_t z_raw = (int16_t)((mag_data[5] << 8) | mag_data[4]);
+
+            float rx = x_raw * 0.15f; 
+            float ry = y_raw * 0.15f;
+            float rz = z_raw * 0.15f;
 
             xSemaphoreTake(g_data_mux, portMAX_DELAY);
-            g_data.magX = x * 0.15f; 
-            g_data.magY = y * 0.15f;
-            g_data.magZ = z * 0.15f;
+            
+            if (g_data.is_calibrating) {
+                if (rx < g_data.minX) g_data.minX = rx;
+                if (ry < g_data.minY) g_data.minY = ry;
+                if (rz < g_data.minZ) g_data.minZ = rz;
+                if (rx > g_data.maxX) g_data.maxX = rx;
+                if (ry > g_data.maxY) g_data.maxY = ry;
+                if (rz > g_data.maxZ) g_data.maxZ = rz;
+            }
 
-            if (g_data.magX < g_data.minX) g_data.minX = g_data.magX;
-            if (g_data.magY < g_data.minY) g_data.minY = g_data.magY;
-            if (g_data.magZ < g_data.minZ) g_data.minZ = g_data.magZ;
-            if (g_data.magX > g_data.maxX) g_data.maxX = g_data.magX;
-            if (g_data.magY > g_data.maxY) g_data.maxY = g_data.magY;
-            if (g_data.magZ > g_data.maxZ) g_data.maxZ = g_data.magZ;
+            // Apply Hard Iron Offset
+            float hx = rx - g_data.cal_offset[0];
+            float hy = ry - g_data.cal_offset[1];
+            float hz = rz - g_data.cal_offset[2];
+
+            // Apply Soft Iron Matrix
+            g_data.magX = hx * g_data.cal_matrix[0][0] + hy * g_data.cal_matrix[0][1] + hz * g_data.cal_matrix[0][2];
+            g_data.magY = hx * g_data.cal_matrix[1][0] + hy * g_data.cal_matrix[1][1] + hz * g_data.cal_matrix[1][2];
+            g_data.magZ = hx * g_data.cal_matrix[2][0] + hy * g_data.cal_matrix[2][1] + hz * g_data.cal_matrix[2][2];
 
             // Calculate heading (Standard compass: 0=N, 90=E, 180=S, 270=W)
-            // If East and West are flipped, negate the Y axis to reverse the rotation direction.
             g_data.heading = atan2f(-g_data.magY, g_data.magX) * 180.0f / (float)M_PI;
             if (g_data.heading < 0) g_data.heading += 360.0f;
             
             if (++log_cnt >= 10) {
-                ESP_LOGI(TAG, "Heading: %.2f, Mag: [%.2f, %.2f, %.2f]", g_data.heading, g_data.magX, g_data.magY, g_data.magZ);
+                ESP_LOGD(TAG, "Heading: %.2f, Mag: [%.2f, %.2f, %.2f]", g_data.heading, g_data.magX, g_data.magY, g_data.magZ);
                 log_cnt = 0;
             }
             xSemaphoreGive(g_data_mux);
 
             // LED Update
             if (g_data.sensor_ok) {
-                led_strip_set_pixel(led_strip, 0, 0, 255, 0); // LED 0 Green
+                if (g_data.is_calibrating) {
+                    led_strip_set_pixel(led_strip, 0, 255, 255, 0); // Yellow while calibrating
+                } else {
+                    led_strip_set_pixel(led_strip, 0, 0, 255, 0); // LED 0 Green
+                }
             } else {
                 led_strip_set_pixel(led_strip, 0, 255, 0, 0); // LED 0 Red
             }
@@ -248,22 +313,79 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
 }
 
 static esp_err_t data_get_handler(httpd_req_t *req) {
-    char json_str[256];
+    char json_str[512];
     xSemaphoreTake(g_data_mux, portMAX_DELAY);
     snprintf(json_str, sizeof(json_str), 
-        "{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,\"minX\":%.2f,\"minY\":%.2f,\"minZ\":%.2f,\"maxX\":%.2f,\"maxY\":%.2f,\"maxZ\":%.2f,\"heading\":%.2f,\"ok\":%s}",
+        "{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,\"minX\":%.2f,\"minY\":%.2f,\"minZ\":%.2f,\"maxX\":%.2f,\"maxY\":%.2f,\"maxZ\":%.2f,\"heading\":%.2f,\"ok\":%s,\"is_calibrating\":%s}",
         g_data.magX, g_data.magY, g_data.magZ, 
         g_data.minX, g_data.minY, g_data.minZ,
         g_data.maxX, g_data.maxY, g_data.maxZ,
-        g_data.heading, g_data.sensor_ok ? "true" : "false");
+        g_data.heading, g_data.sensor_ok ? "true" : "false",
+        g_data.is_calibrating ? "true" : "false");
     xSemaphoreGive(g_data_mux);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json_str, strlen(json_str));
     return ESP_OK;
 }
 
+static esp_err_t calibrate_post_handler(httpd_req_t *req) {
+    char buf[100];
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        char cmd[10];
+        if (httpd_query_key_value(buf, "cmd", cmd, sizeof(cmd)) == ESP_OK) {
+            xSemaphoreTake(g_data_mux, portMAX_DELAY);
+            if (strcmp(cmd, "start") == 0) {
+                g_data.is_calibrating = true;
+                g_data.minX = 10000; g_data.minY = 10000; g_data.minZ = 10000;
+                g_data.maxX = -10000; g_data.maxY = -10000; g_data.maxZ = -10000;
+                ESP_LOGI(TAG, "Calibration started");
+            } else if (strcmp(cmd, "stop") == 0) {
+                g_data.is_calibrating = false;
+                
+                // Calculate Hard Iron Offset
+                float offset_x = (g_data.maxX + g_data.minX) / 2.0f;
+                float offset_y = (g_data.maxY + g_data.minY) / 2.0f;
+                float offset_z = (g_data.maxZ + g_data.minZ) / 2.0f;
+                
+                // Calculate Soft Iron Diagonal Scale Matrix
+                float delta_x = (g_data.maxX - g_data.minX) / 2.0f;
+                float delta_y = (g_data.maxY - g_data.minY) / 2.0f;
+                float delta_z = (g_data.maxZ - g_data.minZ) / 2.0f;
+                
+                // Prevent divide by zero
+                if(delta_x == 0) delta_x = 1;
+                if(delta_y == 0) delta_y = 1;
+                if(delta_z == 0) delta_z = 1;
+
+                float avg_delta = (delta_x + delta_y + delta_z) / 3.0f;
+
+                g_data.cal_offset[0] = offset_x;
+                g_data.cal_offset[1] = offset_y;
+                g_data.cal_offset[2] = offset_z;
+
+                memset(g_data.cal_matrix, 0, sizeof(g_data.cal_matrix));
+                g_data.cal_matrix[0][0] = avg_delta / delta_x;
+                g_data.cal_matrix[1][1] = avg_delta / delta_y;
+                g_data.cal_matrix[2][2] = avg_delta / delta_z;
+
+                ESP_LOGI(TAG, "Calibration stopped. Offsets: %.2f, %.2f, %.2f", offset_x, offset_y, offset_z);
+                xSemaphoreGive(g_data_mux);
+                
+                save_calibration();
+                
+                httpd_resp_sendstr(req, "Calibration stopped and saved.");
+                return ESP_OK;
+            }
+            xSemaphoreGive(g_data_mux);
+        }
+    }
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+}
+
 static const httpd_uri_t root = { .uri = "/", .method = HTTP_GET, .handler = root_get_handler };
-static const httpd_uri_t data = { .uri = "/api/data", .method = HTTP_GET, .handler = data_get_handler };
+static const httpd_uri_t data_api = { .uri = "/api/data", .method = HTTP_GET, .handler = data_get_handler };
+static const httpd_uri_t cal_api = { .uri = "/api/calibrate", .method = HTTP_POST, .handler = calibrate_post_handler };
 
 esp_err_t start_rest_server(void) {
     httpd_handle_t server = NULL;
@@ -271,7 +393,8 @@ esp_err_t start_rest_server(void) {
     config.lru_purge_enable = true;
     if (httpd_start(&server, &config) == ESP_OK) {
         httpd_register_uri_handler(server, &root);
-        httpd_register_uri_handler(server, &data);
+        httpd_register_uri_handler(server, &data_api);
+        httpd_register_uri_handler(server, &cal_api);
         return ESP_OK;
     }
     return ESP_FAIL;
@@ -286,6 +409,8 @@ void app_main(void) {
     ESP_ERROR_CHECK(ret);
 
     g_data_mux = xSemaphoreCreateMutex();
+    
+    load_calibration();
     
     wifi_init_sta();
     i2c_master_init();
