@@ -102,6 +102,16 @@ const char index_html[] PROGMEM = R"rawliteral(
                 Y: <span id="minY">0</span> / <span id="maxY">0</span><br>
                 Z: <span id="minZ">0</span> / <span id="maxZ">0</span>
             </div>
+            <div style="grid-column: 1 / -1; background: #fafafa; padding: 10px; border-radius: 5px; border: 1px solid #eee;">
+                <h3 style="margin-top:0;">Calibration Parameters</h3>
+                <p style="margin:5px 0;"><strong>Offsets (Hard Iron):</strong> <span id="calOffsets">[0.00, 0.00, 0.00]</span></p>
+                <p style="margin:5px 0;"><strong>Matrix (Soft Iron):</strong></p>
+                <div style="font-family: monospace; background:#fff; padding:5px; border:1px solid #ccc; display:inline-block;">
+                    <span id="calM0">[1.000, 0.000, 0.000]</span><br>
+                    <span id="calM1">[0.000, 1.000, 0.000]</span><br>
+                    <span id="calM2">[0.000, 0.000, 1.000]</span>
+                </div>
+            </div>
         </div>
 
         <h3>Magnetometer Bars</h3>
@@ -151,6 +161,13 @@ const char index_html[] PROGMEM = R"rawliteral(
                     document.getElementById('maxX').innerText = data.maxX.toFixed(2);
                     document.getElementById('maxY').innerText = data.maxY.toFixed(2);
                     document.getElementById('maxZ').innerText = data.maxZ.toFixed(2);
+                    
+                    if (data.cal_offset) {
+                        document.getElementById('calOffsets').innerText = `[${data.cal_offset[0].toFixed(2)}, ${data.cal_offset[1].toFixed(2)}, ${data.cal_offset[2].toFixed(2)}]`;
+                        document.getElementById('calM0').innerText = `[${data.cal_matrix[0][0].toFixed(3)}, ${data.cal_matrix[0][1].toFixed(3)}, ${data.cal_matrix[0][2].toFixed(3)}]`;
+                        document.getElementById('calM1').innerText = `[${data.cal_matrix[1][0].toFixed(3)}, ${data.cal_matrix[1][1].toFixed(3)}, ${data.cal_matrix[1][2].toFixed(3)}]`;
+                        document.getElementById('calM2').innerText = `[${data.cal_matrix[2][0].toFixed(3)}, ${data.cal_matrix[2][1].toFixed(3)}, ${data.cal_matrix[2][2].toFixed(3)}]`;
+                    }
 
                     const mapBar = (v) => Math.min(100, Math.max(0, (v + 60) / 1.2));
                     document.getElementById('barX').style.width = mapBar(data.x) + '%';
