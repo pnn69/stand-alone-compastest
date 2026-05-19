@@ -87,7 +87,7 @@ const char index_html[] PROGMEM = R"rawliteral(
             <div style="position:absolute; top:50%; left:5px; transform:translateY(-50%); font-weight:bold;">W</div>
             <div style="position:absolute; top:50%; right:5px; transform:translateY(-50%); font-weight:bold;">E</div>
         </div>
-        <h2 id="heading">0°</h2>
+        <h2 id="heading">0&deg;</h2>
         
         <div class="data-grid">
             <div>
