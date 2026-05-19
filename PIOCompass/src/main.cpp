@@ -5,6 +5,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <math.h>
 #include <ArduinoOTA.h>
+#include <Preferences.h>
 
 // Configuration
 const char* ssid = "NicE_WiFi";
@@ -23,6 +24,7 @@ const char* password = "!Ni1001100110";
 
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 WebServer server(80);
+Preferences preferences;
 
 // Data Structure
 struct CompassData {
@@ -31,6 +33,10 @@ struct CompassData {
   float maxX, maxY, maxZ;
   float heading;
   bool sensor_ok;
+  
+  bool is_calibrating;
+  float cal_offset[3];
+  float cal_matrix[3][3];
 };
 
 CompassData g_data = {
@@ -38,7 +44,10 @@ CompassData g_data = {
   10000.0f, 10000.0f, 10000.0f,       // minX, minY, minZ
   -10000.0f, -10000.0f, -10000.0f,    // maxX, maxY, maxZ
   0.0f,                               // heading
-  false                               // sensor_ok
+  false,                              // sensor_ok
+  false,                              // is_calibrating
+  {0, 0, 0},                          // cal_offset
+  { {1,0,0}, {0,1,0}, {0,0,1} }       // cal_matrix
 };
 
 uint8_t icm_addr = ICM20948_ADDR_1;
@@ -54,7 +63,7 @@ const char index_html[] PROGMEM = R"rawliteral(
         body { font-family: sans-serif; text-align: center; background: #f0f0f0; margin: 0; padding: 20px; }
         .container { max-width: 600px; margin: auto; padding: 20px; background: white; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
         .compass { position: relative; width: 200px; height: 200px; margin: 20px auto; border: 5px solid #333; border-radius: 50%; background: white; }
-        .needle { position: absolute; top: 50%; left: 50%; width: 4px; height: 100px; background: red; transform-origin: bottom; transform: translate(-50%, -100%) rotate(0deg); }
+        .needle { position: absolute; top: 50%; left: 50%; width: 4px; height: 100px; background: red; transform-origin: bottom; transform: translate(-50%, -100%) rotate(0deg); transition: transform 0.2s; }
         .data-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; text-align: left; }
         .bar-container { height: 20px; background: #ddd; border-radius: 10px; overflow: hidden; margin: 5px 0; }
         .bar { height: 100%; transition: width 0.1s; }
@@ -63,6 +72,9 @@ const char index_html[] PROGMEM = R"rawliteral(
         .bar-z { background: #4d4dff; }
         h1 { font-size: 1.5rem; }
         h3 { margin-bottom: 5px; font-size: 1rem; }
+        .cal-btn { padding: 10px 20px; font-size: 1rem; background: #007BFF; color: white; border: none; border-radius: 5px; cursor: pointer; margin-top: 20px; }
+        .cal-btn.calibrating { background: #dc3545; animation: pulse 1s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
     </style>
 </head>
 <body>
@@ -79,13 +91,13 @@ const char index_html[] PROGMEM = R"rawliteral(
         
         <div class="data-grid">
             <div>
-                <h3>Live Data (uT)</h3>
+                <h3>Live Data (Compensated)</h3>
                 X: <span id="valX">0</span><br>
                 Y: <span id="valY">0</span><br>
                 Z: <span id="valZ">0</span>
             </div>
             <div>
-                <h3>Min / Max</h3>
+                <h3>Raw Min / Max</h3>
                 X: <span id="minX">0</span> / <span id="maxX">0</span><br>
                 Y: <span id="minY">0</span> / <span id="maxY">0</span><br>
                 Z: <span id="minZ">0</span> / <span id="maxZ">0</span>
@@ -96,11 +108,24 @@ const char index_html[] PROGMEM = R"rawliteral(
         X: <div class="bar-container"><div id="barX" class="bar bar-x" style="width: 50%;"></div></div>
         Y: <div class="bar-container"><div id="barY" class="bar bar-y" style="width: 50%;"></div></div>
         Z: <div class="bar-container"><div id="barZ" class="bar bar-z" style="width: 50%;"></div></div>
+        
+        <button id="calBtn" class="cal-btn" onclick="toggleCal()">Start Calibration</button>
+        <p id="calStatus" style="font-size: 0.9rem; color: #555; margin-top: 10px;">Rotate the device in all directions during calibration (Figure 8).</p>
+        
         <p id="status" style="font-size: 0.8rem; color: #666; margin-top: 20px;">Sensor: Offline</p>
     </div>
 
     <script>
         let currentRotation = 0;
+        let isCalibrating = false;
+
+        function toggleCal() {
+            const cmd = isCalibrating ? 'stop' : 'start';
+            fetch('/api/calibrate?cmd=' + cmd, { method: 'POST' })
+                .then(r => r.text())
+                .then(res => console.log('Calibration ' + cmd + ': ' + res))
+                .catch(e => console.error(e));
+        }
 
         function updateData() {
             fetch('/api/data')
@@ -108,7 +133,6 @@ const char index_html[] PROGMEM = R"rawliteral(
                 .then(data => {
                     document.getElementById('heading').innerText = data.heading.toFixed(1) + '°';
                     
-                    // Prevent 360-degree spin when crossing North
                     let targetHeading = data.heading;
                     let diff = targetHeading - (currentRotation % 360);
                     if (diff > 180) diff -= 360;
@@ -135,6 +159,16 @@ const char index_html[] PROGMEM = R"rawliteral(
                     
                     document.getElementById('status').innerText = "Sensor: " + (data.ok ? "Online" : "Error");
                     document.getElementById('status').style.color = data.ok ? "green" : "red";
+
+                    isCalibrating = data.is_calibrating;
+                    const btn = document.getElementById('calBtn');
+                    if (isCalibrating) {
+                        btn.innerText = "Stop Calibration & Save";
+                        btn.classList.add('calibrating');
+                    } else {
+                        btn.innerText = "Start Calibration";
+                        btn.classList.remove('calibrating');
+                    }
                 })
                 .catch(e => {
                     document.getElementById('status').innerText = "Status: Connection Error";
@@ -152,6 +186,25 @@ void writeI2C(uint8_t dev_addr, uint8_t reg, uint8_t data) {
   Wire.write(reg);
   Wire.write(data);
   Wire.endTransmission();
+}
+
+void loadCalibration() {
+  preferences.begin("compass", false); // read-only false
+  if (preferences.getBytesLength("cal_offset") == sizeof(g_data.cal_offset)) {
+    preferences.getBytes("cal_offset", g_data.cal_offset, sizeof(g_data.cal_offset));
+  }
+  if (preferences.getBytesLength("cal_matrix") == sizeof(g_data.cal_matrix)) {
+    preferences.getBytes("cal_matrix", g_data.cal_matrix, sizeof(g_data.cal_matrix));
+  }
+  preferences.end();
+}
+
+void saveCalibration() {
+  preferences.begin("compass", false);
+  preferences.putBytes("cal_offset", g_data.cal_offset, sizeof(g_data.cal_offset));
+  preferences.putBytes("cal_matrix", g_data.cal_matrix, sizeof(g_data.cal_matrix));
+  preferences.end();
+  Serial.println("Calibration saved to Preferences.");
 }
 
 void initSensor() {
@@ -200,14 +253,57 @@ void handleRoot() {
 }
 
 void handleData() {
-  char json[256];
+  char json[512];
   snprintf(json, sizeof(json), 
-      "{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,\"minX\":%.2f,\"minY\":%.2f,\"minZ\":%.2f,\"maxX\":%.2f,\"maxY\":%.2f,\"maxZ\":%.2f,\"heading\":%.2f,\"ok\":%s}",
+      "{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,\"minX\":%.2f,\"minY\":%.2f,\"minZ\":%.2f,\"maxX\":%.2f,\"maxY\":%.2f,\"maxZ\":%.2f,\"heading\":%.2f,\"ok\":%s,\"is_calibrating\":%s}",
       g_data.magX, g_data.magY, g_data.magZ, 
       g_data.minX, g_data.minY, g_data.minZ,
       g_data.maxX, g_data.maxY, g_data.maxZ,
-      g_data.heading, g_data.sensor_ok ? "true" : "false");
+      g_data.heading, g_data.sensor_ok ? "true" : "false",
+      g_data.is_calibrating ? "true" : "false");
   server.send(200, "application/json", json);
+}
+
+void handleCalibrate() {
+  if (server.hasArg("cmd")) {
+    String cmd = server.arg("cmd");
+    if (cmd == "start") {
+      g_data.is_calibrating = true;
+      g_data.minX = 10000; g_data.minY = 10000; g_data.minZ = 10000;
+      g_data.maxX = -10000; g_data.maxY = -10000; g_data.maxZ = -10000;
+      server.send(200, "text/plain", "Started");
+      return;
+    } else if (cmd == "stop") {
+      g_data.is_calibrating = false;
+      float offset_x = (g_data.maxX + g_data.minX) / 2.0f;
+      float offset_y = (g_data.maxY + g_data.minY) / 2.0f;
+      float offset_z = (g_data.maxZ + g_data.minZ) / 2.0f;
+      
+      float delta_x = (g_data.maxX - g_data.minX) / 2.0f;
+      float delta_y = (g_data.maxY - g_data.minY) / 2.0f;
+      float delta_z = (g_data.maxZ - g_data.minZ) / 2.0f;
+      
+      if(delta_x == 0) delta_x = 1;
+      if(delta_y == 0) delta_y = 1;
+      if(delta_z == 0) delta_z = 1;
+
+      float avg_delta = (delta_x + delta_y + delta_z) / 3.0f;
+
+      g_data.cal_offset[0] = offset_x;
+      g_data.cal_offset[1] = offset_y;
+      g_data.cal_offset[2] = offset_z;
+
+      memset(g_data.cal_matrix, 0, sizeof(g_data.cal_matrix));
+      g_data.cal_matrix[0][0] = avg_delta / delta_x;
+      g_data.cal_matrix[1][1] = avg_delta / delta_y;
+      g_data.cal_matrix[2][2] = avg_delta / delta_z;
+
+      saveCalibration();
+      server.send(200, "text/plain", "Stopped and saved");
+      return;
+    }
+  }
+  server.send(400, "text/plain", "Invalid command");
 }
 
 void setup() {
@@ -215,6 +311,7 @@ void setup() {
   strip.begin();
   strip.show(); // Initialize all pixels to 'off'
 
+  loadCalibration();
   initSensor();
 
   WiFi.mode(WIFI_STA);
@@ -232,6 +329,7 @@ void setup() {
 
   server.on("/", handleRoot);
   server.on("/api/data", handleData);
+  server.on("/api/calibrate", HTTP_POST, handleCalibrate);
   server.begin();
 }
 
@@ -261,14 +359,33 @@ void loop() {
         float rawY = y * 0.15f;
         float rawZ = z * 0.15f;
 
-        // Moving Average for raw X, Y, Z (5 samples)
+        if (g_data.is_calibrating) {
+          if (rawX < g_data.minX) g_data.minX = rawX;
+          if (rawY < g_data.minY) g_data.minY = rawY;
+          if (rawZ < g_data.minZ) g_data.minZ = rawZ;
+          if (rawX > g_data.maxX) g_data.maxX = rawX;
+          if (rawY > g_data.maxY) g_data.maxY = rawY;
+          if (rawZ > g_data.maxZ) g_data.maxZ = rawZ;
+        }
+
+        // Apply Hard Iron Offset
+        float hx = rawX - g_data.cal_offset[0];
+        float hy = rawY - g_data.cal_offset[1];
+        float hz = rawZ - g_data.cal_offset[2];
+
+        // Apply Soft Iron Matrix
+        float compX = hx * g_data.cal_matrix[0][0] + hy * g_data.cal_matrix[0][1] + hz * g_data.cal_matrix[0][2];
+        float compY = hx * g_data.cal_matrix[1][0] + hy * g_data.cal_matrix[1][1] + hz * g_data.cal_matrix[1][2];
+        float compZ = hx * g_data.cal_matrix[2][0] + hy * g_data.cal_matrix[2][1] + hz * g_data.cal_matrix[2][2];
+
+        // Moving Average for compensated X, Y, Z (5 samples)
         static float avgX_samples[5] = {0}, avgY_samples[5] = {0}, avgZ_samples[5] = {0};
         static int avg_idx = 0;
         static int avg_count = 0;
 
-        avgX_samples[avg_idx] = rawX;
-        avgY_samples[avg_idx] = rawY;
-        avgZ_samples[avg_idx] = rawZ;
+        avgX_samples[avg_idx] = compX;
+        avgY_samples[avg_idx] = compY;
+        avgZ_samples[avg_idx] = compZ;
         avg_idx = (avg_idx + 1) % AVERIDGE_COUNT;
         if (avg_count < AVERIDGE_COUNT) avg_count++;
 
@@ -282,13 +399,6 @@ void loop() {
         g_data.magX = sumX / avg_count;
         g_data.magY = sumY / avg_count;
         g_data.magZ = sumZ / avg_count;
-
-        if (g_data.magX < g_data.minX) g_data.minX = g_data.magX;
-        if (g_data.magY < g_data.minY) g_data.minY = g_data.magY;
-        if (g_data.magZ < g_data.minZ) g_data.minZ = g_data.magZ;
-        if (g_data.magX > g_data.maxX) g_data.maxX = g_data.magX;
-        if (g_data.magY > g_data.maxY) g_data.maxY = g_data.magY;
-        if (g_data.magZ > g_data.maxZ) g_data.maxZ = g_data.magZ;
 
         // Calculate heading using Y and Z axes with circular averaging (5 samples)
         static float sin_samples[5] = {0};
@@ -318,7 +428,11 @@ void loop() {
 
     // Update LEDs
     if (g_data.sensor_ok) {
-      strip.setPixelColor(0, strip.Color(0, 255, 0)); // Green
+      if (g_data.is_calibrating) {
+        strip.setPixelColor(0, strip.Color(255, 255, 0)); // Yellow
+      } else {
+        strip.setPixelColor(0, strip.Color(0, 255, 0)); // Green
+      }
     } else {
       strip.setPixelColor(0, strip.Color(255, 0, 0)); // Red
     }
