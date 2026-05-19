@@ -253,14 +253,20 @@ void handleRoot() {
 }
 
 void handleData() {
-  char json[512];
+  char json[1024];
   snprintf(json, sizeof(json), 
-      "{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,\"minX\":%.2f,\"minY\":%.2f,\"minZ\":%.2f,\"maxX\":%.2f,\"maxY\":%.2f,\"maxZ\":%.2f,\"heading\":%.2f,\"ok\":%s,\"is_calibrating\":%s}",
+      "{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,\"minX\":%.2f,\"minY\":%.2f,\"minZ\":%.2f,\"maxX\":%.2f,\"maxY\":%.2f,\"maxZ\":%.2f,\"heading\":%.2f,\"ok\":%s,\"is_calibrating\":%s,"
+      "\"cal_offset\":[%.2f,%.2f,%.2f],"
+      "\"cal_matrix\":[[%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f]]}",
       g_data.magX, g_data.magY, g_data.magZ, 
       g_data.minX, g_data.minY, g_data.minZ,
       g_data.maxX, g_data.maxY, g_data.maxZ,
       g_data.heading, g_data.sensor_ok ? "true" : "false",
-      g_data.is_calibrating ? "true" : "false");
+      g_data.is_calibrating ? "true" : "false",
+      g_data.cal_offset[0], g_data.cal_offset[1], g_data.cal_offset[2],
+      g_data.cal_matrix[0][0], g_data.cal_matrix[0][1], g_data.cal_matrix[0][2],
+      g_data.cal_matrix[1][0], g_data.cal_matrix[1][1], g_data.cal_matrix[1][2],
+      g_data.cal_matrix[2][0], g_data.cal_matrix[2][1], g_data.cal_matrix[2][2]);
   server.send(200, "application/json", json);
 }
 
