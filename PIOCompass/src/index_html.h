@@ -45,7 +45,9 @@ const char index_html[] PROGMEM = R"rawliteral(
                 <h3>Live Data (Compensated)</h3>
                 X: <span id="valX">0</span><br>
                 Y: <span id="valY">0</span><br>
-                Z: <span id="valZ">0</span>
+                Z: <span id="valZ">0</span><br>
+                <strong>Pitch: <span id="valPitch">0</span>&deg;</strong><br>
+                <strong>Roll: <span id="valRoll">0</span>&deg;</strong>
             </div>
             <div>
                 <h3>Raw Min / Max</h3>
@@ -72,6 +74,12 @@ const char index_html[] PROGMEM = R"rawliteral(
         
         <button id="calBtn" class="cal-btn" onclick="toggleCal()">Start Calibration</button>
         <p id="calStatus" style="font-size: 0.9rem; color: #555; margin-top: 10px;">Rotate the device in all directions during calibration (Figure 8).</p>
+
+        <div id="calCanvasContainer" style="display: none; margin-top: 20px;">
+            <h3>Calibration Coverage</h3>
+            <p style="font-size: 0.8rem; color: #666; margin-bottom: 5px;">Rotate until you form a complete circle.</p>
+            <canvas id="calCanvas" width="200" height="200" style="border: 1px solid #ccc; border-radius: 5px; background: #fafafa;"></canvas>
+        </div>
         
         <p id="status" style="font-size: 0.8rem; color: #666; margin-top: 20px;">Sensor: Offline</p>
     </div>
@@ -79,9 +87,25 @@ const char index_html[] PROGMEM = R"rawliteral(
     <script>
         let currentRotation = 0;
         let isCalibrating = false;
+        let canvas = document.getElementById('calCanvas');
+        let ctx = canvas.getContext('2d');
+
+        function clearCanvas() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.beginPath();
+            ctx.strokeStyle = '#ddd';
+            ctx.moveTo(100, 0); ctx.lineTo(100, 200);
+            ctx.moveTo(0, 100); ctx.lineTo(200, 100);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(100, 100, 90, 0, 2 * Math.PI);
+            ctx.stroke();
+        }
+        clearCanvas();
 
         function toggleCal() {
             const cmd = isCalibrating ? 'stop' : 'start';
+            if (cmd === 'start') clearCanvas();
             fetch('/api/calibrate?cmd=' + cmd, { method: 'POST' })
                 .then(r => r.text())
                 .then(res => console.log('Calibration ' + cmd + ': ' + res))
@@ -105,6 +129,10 @@ const char index_html[] PROGMEM = R"rawliteral(
                     document.getElementById('valX').innerText = data.x.toFixed(2);
                     document.getElementById('valY').innerText = data.y.toFixed(2);
                     document.getElementById('valZ').innerText = data.z.toFixed(2);
+                    if (data.pitch !== undefined) {
+                        document.getElementById('valPitch').innerText = data.pitch.toFixed(1);
+                        document.getElementById('valRoll').innerText = data.roll.toFixed(1);
+                    }
 
                     document.getElementById('minX').innerText = data.minX.toFixed(2);
                     document.getElementById('minY').innerText = data.minY.toFixed(2);
@@ -130,12 +158,22 @@ const char index_html[] PROGMEM = R"rawliteral(
 
                     isCalibrating = data.is_calibrating;
                     const btn = document.getElementById('calBtn');
+                    const canvasContainer = document.getElementById('calCanvasContainer');
+                    
                     if (isCalibrating) {
                         btn.innerText = "Stop Calibration & Save";
                         btn.classList.add('calibrating');
+                        canvasContainer.style.display = 'block';
+                        
+                        // Plot X/Y raw data
+                        let px = 100 + (data.x / 60) * 90;
+                        let py = 100 - (data.y / 60) * 90;
+                        ctx.fillStyle = '#ff4d4d';
+                        ctx.fillRect(px, py, 3, 3);
                     } else {
                         btn.innerText = "Start Calibration";
                         btn.classList.remove('calibrating');
+                        canvasContainer.style.display = 'none';
                     }
                 })
                 .catch(e => {
