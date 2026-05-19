@@ -282,29 +282,85 @@ void loop() {
         g_data.magY = sumY / avg_count;
         g_data.magZ = sumZ / avg_count;
 
-        // Calculate heading using Y and Z axes with circular averaging (5 samples)
-        static float sin_samples[5] = {0};
-        static float cos_samples[5] = {0};
-        static int sample_idx = 0;
-        static int sample_count = 0;
+        // Read Accelerometer for Tilt Compensation
+        Wire.beginTransmission(icm_addr);
+        Wire.write(0x2D);
+        Wire.endTransmission(false);
+        Wire.requestFrom((uint16_t)icm_addr, (uint8_t)6);
+        if (Wire.available() >= 6) {
+          int16_t ax_raw = (Wire.read() << 8) | Wire.read();
+          int16_t ay_raw = (Wire.read() << 8) | Wire.read();
+          int16_t az_raw = (Wire.read() << 8) | Wire.read();
+          
+          static float ax_avg = 0, ay_avg = 0, az_avg = 0;
+          ax_avg = ax_avg * 0.9f + ax_raw * 0.1f;
+          ay_avg = ay_avg * 0.9f + ay_raw * 0.1f;
+          az_avg = az_avg * 0.9f + az_raw * 0.1f;
 
-        float current_h_rad = atan2f(g_data.magZ, g_data.magY);
-        sin_samples[sample_idx] = sinf(current_h_rad);
-        cos_samples[sample_idx] = cosf(current_h_rad);
-        
-        sample_idx = (sample_idx + 1) % AVERIDGE_COUNT;
-        if (sample_count < AVERIDGE_COUNT) sample_count++;
+          // Map Accel to Mag frame (ICM20948 datasheet: Accel_X=Mag_Y, Accel_Y=Mag_X, Accel_Z=-Mag_Z)
+          float gx = ay_avg;
+          float gy = ax_avg;
+          float gz = -az_avg;
 
-        float sum_sin = 0, sum_cos = 0;
-        for (int i = 0; i < sample_count; i++) {
-          sum_sin += sin_samples[i];
-          sum_cos += cos_samples[i];
+          float g_norm = sqrt(gx*gx + gy*gy + gz*gz);
+          if (g_norm > 0) { gx /= g_norm; gy /= g_norm; gz /= g_norm; }
+          else { gx = 1; gy = 0; gz = 0; }
+
+          float mx = g_data.magX;
+          float my = g_data.magY;
+          float mz = g_data.magZ;
+
+          // 1. Horizontal Mag vector (m - (m dot g)*g)
+          float m_dot_g = mx*gx + my*gy + mz*gz;
+          float m_hx = mx - m_dot_g * gx;
+          float m_hy = my - m_dot_g * gy;
+          float m_hz = mz - m_dot_g * gz;
+
+          // 2. Device Forward vector (0, 0, 1) projected to horizontal
+          float f_dot_g = gz;
+          float f_hx = 0 - f_dot_g * gx;
+          float f_hy = 0 - f_dot_g * gy;
+          float f_hz = 1 - f_dot_g * gz;
+          float f_norm = sqrt(f_hx*f_hx + f_hy*f_hy + f_hz*f_hz);
+          if (f_norm > 0) { f_hx /= f_norm; f_hy /= f_norm; f_hz /= f_norm; }
+          else { f_hx = 0; f_hy = 0; f_hz = 1; }
+
+          // 3. Device Right vector (0, -1, 0) projected to horizontal
+          float r_dot_g = -gy;
+          float r_hx = 0 - r_dot_g * gx;
+          float r_hy = -1 - r_dot_g * gy;
+          float r_hz = 0 - r_dot_g * gz;
+          float r_norm = sqrt(r_hx*r_hx + r_hy*r_hy + r_hz*r_hz);
+          if (r_norm > 0) { r_hx /= r_norm; r_hy /= r_norm; r_hz /= r_norm; }
+          else { r_hx = 0; r_hy = -1; r_hz = 0; }
+
+          // Calculate North and East components
+          float mag_north = m_hx * f_hx + m_hy * f_hy + m_hz * f_hz;
+          float mag_east  = m_hx * r_hx + m_hy * r_hy + m_hz * r_hz;
+
+          // Calculate heading with circular averaging
+          static float sin_samples[5] = {0};
+          static float cos_samples[5] = {0};
+          static int sample_idx = 0;
+          static int sample_count = 0;
+
+          float current_h_rad = atan2f(mag_east, mag_north);
+          sin_samples[sample_idx] = sinf(current_h_rad);
+          cos_samples[sample_idx] = cosf(current_h_rad);
+          
+          sample_idx = (sample_idx + 1) % AVERIDGE_COUNT;
+          if (sample_count < AVERIDGE_COUNT) sample_count++;
+
+          float sum_sin = 0, sum_cos = 0;
+          for (int i = 0; i < sample_count; i++) {
+            sum_sin += sin_samples[i];
+            sum_cos += cos_samples[i];
+          }
+
+          g_data.heading = atan2f(sum_sin, sum_cos) * 180.0f / PI;
+          if (g_data.heading < 0) g_data.heading += 360.0f;
+          if (g_data.heading >= 360.0f) g_data.heading -= 360.0f;
         }
-
-        g_data.heading = atan2f(sum_sin, sum_cos) * 180.0f / PI;
-        g_data.heading -= 90.0f; // -90-degree offset
-        if (g_data.heading < 0) g_data.heading += 360.0f;
-        if (g_data.heading >= 360.0f) g_data.heading -= 360.0f;
       }
     }
 
