@@ -76,8 +76,11 @@ const char index_html[] PROGMEM = R"rawliteral(
         <p id="calStatus" style="font-size: 0.9rem; color: #555; margin-top: 10px;">Rotate the device in all directions during calibration (Figure 8).</p>
 
         <div id="calCanvasContainer" style="display: none; margin-top: 20px;">
-            <h3>Calibration Coverage</h3>
-            <p style="font-size: 0.8rem; color: #666; margin-bottom: 5px;">Rotate until you form a complete circle.</p>
+            <h3>Calibration Coverage: <span id="calProgressText">0%</span></h3>
+            <div class="bar-container" style="width: 200px; margin: 0 auto 10px auto; background: #eee;">
+                <div id="calProgressBar" class="bar bar-y" style="width: 0%; background: #007BFF;"></div>
+            </div>
+            <p style="font-size: 0.8rem; color: #666; margin-bottom: 5px;">Rotate until coverage reaches 100%.</p>
             <canvas id="calCanvas" width="200" height="200" style="border: 1px solid #ccc; border-radius: 5px; background: #fafafa;"></canvas>
         </div>
         
@@ -89,6 +92,7 @@ const char index_html[] PROGMEM = R"rawliteral(
         let isCalibrating = false;
         let canvas = document.getElementById('calCanvas');
         let ctx = canvas.getContext('2d');
+        let calBins = new Array(36).fill(false);
 
         function clearCanvas() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -100,6 +104,16 @@ const char index_html[] PROGMEM = R"rawliteral(
             ctx.beginPath();
             ctx.arc(100, 100, 90, 0, 2 * Math.PI);
             ctx.stroke();
+            
+            calBins.fill(false);
+            let pText = document.getElementById('calProgressText');
+            let pBar = document.getElementById('calProgressBar');
+            if (pText && pBar) {
+                pText.innerText = "0%";
+                pText.style.color = "black";
+                pBar.style.width = "0%";
+                pBar.style.background = "#007BFF";
+            }
         }
         clearCanvas();
 
@@ -170,6 +184,36 @@ const char index_html[] PROGMEM = R"rawliteral(
                         let py = 100 - (data.y / 60) * 90;
                         ctx.fillStyle = '#ff4d4d';
                         ctx.fillRect(px, py, 3, 3);
+                        
+                        // Calculate coverage
+                        let cx = (data.maxX + data.minX) / 2;
+                        let cy = (data.maxY + data.minY) / 2;
+                        let rangeX = data.maxX - data.minX;
+                        let rangeY = data.maxY - data.minY;
+                        
+                        if (rangeX > 20 && rangeY > 20) {
+                            let angle = Math.atan2(data.y - cy, data.x - cx) * 180 / Math.PI;
+                            if (angle < 0) angle += 360;
+                            let bin = Math.floor(angle / 10) % 36;
+                            calBins[bin] = true;
+                        }
+                        
+                        let filled = calBins.filter(b => b).length;
+                        let pct = Math.round((filled / 36) * 100);
+                        let pText = document.getElementById('calProgressText');
+                        let pBar = document.getElementById('calProgressBar');
+                        
+                        pText.innerText = pct + "%";
+                        pBar.style.width = pct + "%";
+                        
+                        if (pct >= 95) {
+                            pText.innerText = pct + "% (Ready!)";
+                            pText.style.color = "green";
+                            pBar.style.background = "#4dff4d";
+                        } else {
+                            pText.style.color = "black";
+                            pBar.style.background = "#007BFF";
+                        }
                     } else {
                         btn.innerText = "Start Calibration";
                         btn.classList.remove('calibrating');
