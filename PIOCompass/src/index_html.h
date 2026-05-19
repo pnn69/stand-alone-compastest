@@ -45,9 +45,7 @@ const char index_html[] PROGMEM = R"rawliteral(
                 <h3>Live Data (Compensated)</h3>
                 X: <span id="valX">0</span><br>
                 Y: <span id="valY">0</span><br>
-                Z: <span id="valZ">0</span><br>
-                <strong>Pitch: <span id="valPitch">0</span>&deg;</strong><br>
-                <strong>Roll: <span id="valRoll">0</span>&deg;</strong>
+                Z: <span id="valZ">0</span>
             </div>
             <div>
                 <h3>Raw Min / Max</h3>
@@ -143,10 +141,6 @@ const char index_html[] PROGMEM = R"rawliteral(
                     document.getElementById('valX').innerText = data.x.toFixed(2);
                     document.getElementById('valY').innerText = data.y.toFixed(2);
                     document.getElementById('valZ').innerText = data.z.toFixed(2);
-                    if (data.pitch !== undefined) {
-                        document.getElementById('valPitch').innerText = data.pitch.toFixed(1);
-                        document.getElementById('valRoll').innerText = data.roll.toFixed(1);
-                    }
 
                     document.getElementById('minX').innerText = data.minX.toFixed(2);
                     document.getElementById('minY').innerText = data.minY.toFixed(2);

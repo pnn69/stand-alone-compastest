@@ -32,7 +32,6 @@ struct CompassData {
   float minX, minY, minZ;
   float maxX, maxY, maxZ;
   float heading;
-  float pitch, roll;
   bool sensor_ok;
   
   bool is_calibrating;
@@ -45,7 +44,6 @@ CompassData g_data = {
   10000.0f, 10000.0f, 10000.0f,       // minX, minY, minZ
   -10000.0f, -10000.0f, -10000.0f,    // maxX, maxY, maxZ
   0.0f,                               // heading
-  0.0f, 0.0f,                         // pitch, roll
   false,                              // sensor_ok
   false,                              // is_calibrating
   {0, 0, 0},                          // cal_offset
@@ -133,15 +131,13 @@ void handleRoot() {
 void handleData() {
   char json[1024];
   snprintf(json, sizeof(json), 
-      "{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,\"minX\":%.2f,\"minY\":%.2f,\"minZ\":%.2f,\"maxX\":%.2f,\"maxY\":%.2f,\"maxZ\":%.2f,\"heading\":%.2f,\"pitch\":%.2f,\"roll\":%.2f,\"ok\":%s,\"is_calibrating\":%s,"
+      "{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,\"minX\":%.2f,\"minY\":%.2f,\"minZ\":%.2f,\"maxX\":%.2f,\"maxY\":%.2f,\"maxZ\":%.2f,\"heading\":%.2f,\"ok\":%s,\"is_calibrating\":%s,"
       "\"cal_offset\":[%.2f,%.2f,%.2f],"
       "\"cal_matrix\":[[%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f]]}",
       g_data.magX, g_data.magY, g_data.magZ, 
       g_data.minX, g_data.minY, g_data.minZ,
       g_data.maxX, g_data.maxY, g_data.maxZ,
       g_data.heading, 
-      g_data.pitch * 180.0f / PI, 
-      g_data.roll * 180.0f / PI,
       g_data.sensor_ok ? "true" : "false",
       g_data.is_calibrating ? "true" : "false",
       g_data.cal_offset[0], g_data.cal_offset[1], g_data.cal_offset[2],
@@ -287,72 +283,29 @@ void loop() {
         g_data.magY = sumY / avg_count;
         g_data.magZ = sumZ / avg_count;
 
-        // Read Accelerometer for Tilt Compensation
-        Wire.beginTransmission(icm_addr);
-        Wire.write(0x2D);
-        Wire.endTransmission(false);
-        uint8_t bytesRead = Wire.requestFrom((uint16_t)icm_addr, (uint8_t)6);
-        if (bytesRead >= 6) {
-          int16_t ax_raw = (Wire.read() << 8) | Wire.read();
-          int16_t ay_raw = (Wire.read() << 8) | Wire.read();
-          int16_t az_raw = (Wire.read() << 8) | Wire.read();
-          
-          static float ax_avg = 0, ay_avg = 0, az_avg = 0;
-          ax_avg = ax_avg * 0.8f + ax_raw * 0.2f;
-          ay_avg = ay_avg * 0.8f + ay_raw * 0.2f;
-          az_avg = az_avg * 0.8f + az_raw * 0.2f;
+        // Calculate heading using Y and Z axes with circular averaging (5 samples)
+        static float sin_samples[5] = {0};
+        static float cos_samples[5] = {0};
+        static int sample_idx = 0;
+        static int sample_count = 0;
 
-          // Map Accel to Mag frame (AK09916 inside ICM20948)
-          // Mag X = Accel Y, Mag Y = Accel X, Mag Z = -Accel Z
-          float Ax = ay_avg;
-          float Ay = ax_avg;
-          float Az = -az_avg;
+        float current_h_rad = atan2f(g_data.magZ, g_data.magY);
+        sin_samples[sample_idx] = sinf(current_h_rad);
+        cos_samples[sample_idx] = cosf(current_h_rad);
+        
+        sample_idx = (sample_idx + 1) % AVERIDGE_COUNT;
+        if (sample_count < AVERIDGE_COUNT) sample_count++;
 
-          // Normalize Accelerometer (Gravity) Vector
-          float normA = sqrt(Ax*Ax + Ay*Ay + Az*Az);
-          if (normA == 0) normA = 1;
-          Ax /= normA;
-          Ay /= normA;
-          Az /= normA;
-
-          // Calculate Pitch (theta) and Roll (phi)
-          g_data.pitch = atan2f(-Ax, sqrt(Ay*Ay + Az*Az));
-          g_data.roll = atan2f(Ay, Az);
-
-          // Apply Tilt Compensation
-          float Mx = g_data.magX;
-          float My = g_data.magY;
-          float Mz = g_data.magZ;
-
-          float Xh = Mx * cos(g_data.pitch) + My * sin(g_data.roll)*sin(g_data.pitch) + Mz * cos(g_data.roll)*sin(g_data.pitch);
-          float Yh = My * cos(g_data.roll) - Mz * sin(g_data.roll);
-
-          // Calculate heading
-          float current_h_rad = atan2f(-Yh, Xh);
-          
-          static float sin_samples[5] = {0};
-          static float cos_samples[5] = {0};
-          static int sample_idx = 0;
-          static int sample_count = 0;
-          
-          sin_samples[sample_idx] = sinf(current_h_rad);
-          cos_samples[sample_idx] = cosf(current_h_rad);
-          
-          sample_idx = (sample_idx + 1) % AVERIDGE_COUNT;
-          if (sample_count < AVERIDGE_COUNT) sample_count++;
-
-          float sum_sin = 0, sum_cos = 0;
-          for (int i = 0; i < sample_count; i++) {
-            sum_sin += sin_samples[i];
-            sum_cos += cos_samples[i];
-          }
-
-          g_data.heading = atan2f(sum_sin, sum_cos) * 180.0f / PI;
-          // Apply hardware orientation offset if needed
-          g_data.heading -= 90.0f;
-          if (g_data.heading < 0) g_data.heading += 360.0f;
-          if (g_data.heading >= 360.0f) g_data.heading -= 360.0f;
+        float sum_sin = 0, sum_cos = 0;
+        for (int i = 0; i < sample_count; i++) {
+          sum_sin += sin_samples[i];
+          sum_cos += cos_samples[i];
         }
+
+        g_data.heading = atan2f(sum_sin, sum_cos) * 180.0f / PI;
+        g_data.heading -= 90.0f; // -90-degree offset
+        if (g_data.heading < 0) g_data.heading += 360.0f;
+        if (g_data.heading >= 360.0f) g_data.heading -= 360.0f;
       }
     }
 
