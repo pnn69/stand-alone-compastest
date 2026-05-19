@@ -1,0 +1,23 @@
+# System
+.DS_Store
+Thumbs.db
+
+# Project history and temporary files
+.history/
+.gemini/
+*.zip
+
+# PlatformIO
+.pio/
+libdeps/
+
+# ESP-IDF
+build/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+
+# Arduino
+*.hex
+*.elf
+*.bin
